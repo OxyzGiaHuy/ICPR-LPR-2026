@@ -55,6 +55,13 @@ class Config:
     SPLIT_RATIO: float = 0.9
     USE_CUDNN_BENCHMARK: bool = False
     
+    # Early stopping
+    EARLY_STOPPING_PATIENCE: int = 15  # Stop if no improvement for 15 epochs
+    
+    # Test-time augmentation (TTA)
+    USE_TTA: bool = False              # Enable TTA for validation (slower but more accurate)
+    TTA_AUGMENTS: int = 5              # Number of augmentations (1=off, 5=full)
+    
     # CRNN model hyperparameters
     HIDDEN_SIZE: int = 256
     RNN_DROPOUT: float = 0.25

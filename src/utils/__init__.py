@@ -9,6 +9,7 @@ from src.utils.character_balance import (
     compute_char_frequencies_from_dataset,
     CHAR_FREQUENCIES_FALLBACK
 )
+from src.utils.tta import predict_with_tta, validate_with_tta
 
 __all__ = [
     "seed_everything",
@@ -20,5 +21,7 @@ __all__ = [
     "weighted_ctc_loss",
     "print_weight_statistics",
     "compute_char_frequencies_from_dataset",
-    "CHAR_FREQUENCIES_FALLBACK"
+    "CHAR_FREQUENCIES_FALLBACK",
+    "predict_with_tta",
+    "validate_with_tta",
 ]

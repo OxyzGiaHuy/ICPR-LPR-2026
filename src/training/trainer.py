@@ -93,6 +93,11 @@ class Trainer:
         # Tracking
         self.best_acc = 0.0
         self.current_epoch = 0
+        
+        # Early stopping
+        self.patience = getattr(config, 'EARLY_STOPPING_PATIENCE', 10)
+        self.epochs_no_improve = 0
+        self.early_stop = False
     
     def _get_output_path(self, filename: str) -> str:
         """Get full path for output file in configured directory."""
@@ -431,9 +436,10 @@ class Trainer:
                         print(f"     Ideal={ideal:.2f} | Max imbalance={max_imbalance:.3f}"
                               + (" ✅" if max_imbalance < 0.15 else " ⚠️  experts unbalanced"))
             
-            # Save best model
+            # Save best model and early stopping check
             if val_acc > self.best_acc:
                 self.best_acc = val_acc
+                self.epochs_no_improve = 0
                 self.save_model()
                 exp_name = self._get_exp_name()
                 model_path = self._get_output_path(f"{exp_name}_best.pth")
@@ -456,6 +462,15 @@ class Trainer:
                         max_samples=32,
                         sort_by="wrong_first"
                     )
+            else:
+                self.epochs_no_improve += 1
+                if self.epochs_no_improve >= self.patience:
+                    print(f"\n⏸️  Early stopping triggered! No improvement for {self.patience} epochs.")
+                    print(f"   Best Val Acc: {self.best_acc:.2f}% (Epoch {epoch + 1 - self.patience})")
+                    self.early_stop = True
+                    break
+                else:
+                    print(f"  ⏳ No improvement for {self.epochs_no_improve}/{self.patience} epochs")
         
         # Save final model if no validation was performed (submission mode)
         if self.val_loader is None:
