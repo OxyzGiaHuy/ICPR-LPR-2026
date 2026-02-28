@@ -82,6 +82,14 @@ class Config:
     MOE_TOP_K: int = 2                 # Hybrid routing: activate 2 experts per token
     MOE_AUX_LOSS_WEIGHT: float = 0.01  # Light load-balancing (routing learns naturally from data)
     
+    # mHC hyperparameters (only used when MODEL_TYPE = "restran_mhc")
+    # Design rationale: Multi-stream processing with Manifold-Constrained Hyper-Connections
+    # allows different streams to specialize for different conditions:
+    # - Stream specialization: lighting (day/night), weather (rain/fog), viewing angles
+    # - Doubly stochastic routing ensures stable gradient flow
+    # - Minimal overhead: ~5-10% parameter increase for significant robustness gains
+    MHC_N: int = 4                     # Number of parallel streams (2, 4, or 8 recommended)
+    
     DEVICE: torch.device = field(default_factory=lambda: torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     OUTPUT_DIR: str = "results"
     

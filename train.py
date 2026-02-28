@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from configs.config import Config
 from src.data.dataset import MultiFrameDataset
 from src.models.crnn import MultiFrameCRNN
-from src.models.restran import ResTranOCR, ResTranMoE
+from src.models.restran import ResTranOCR, ResTranMoE, ResTranOCR_mHC
 from src.training.trainer import Trainer
 from src.utils.common import seed_everything
 
@@ -28,8 +28,8 @@ def parse_args() -> argparse.Namespace:
         help="Experiment name for checkpoint/submission files (default: from config)"
     )
     parser.add_argument(
-        "-m", "--model", type=str, choices=["crnn", "restran", "restran_moe"], default=None,
-        help="Model architecture: 'crnn', 'restran', or 'restran_moe' (default: from config)"
+        "-m", "--model", type=str, choices=["crnn", "restran", "restran_moe", "restran_mhc"], default=None,
+        help="Model architecture: 'crnn', 'restran', 'restran_moe', or 'restran_mhc' (default: from config)"
     )
     parser.add_argument(
         "--epochs", type=int, default=None,
@@ -67,6 +67,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--transformer-layers", type=int, default=None,
         help="Number of transformer encoder layers (default: from config)"
+    )
+    parser.add_argument(
+        "--mhc-n", type=int, default=None,
+        help="Number of mHC streams (2, 4, or 8 recommended, default: from config)"
     )
     parser.add_argument(
         "--aug-level",
@@ -258,6 +262,19 @@ def main():
             moe_aux_loss_weight=config.MOE_AUX_LOSS_WEIGHT,
         ).to(config.DEVICE)
         print(f"   MoE: {config.MOE_NUM_EXPERTS} experts, top-{config.MOE_TOP_K} routing, aux_loss_weight={config.MOE_AUX_LOSS_WEIGHT}")
+    elif config.MODEL_TYPE == "restran_mhc":
+        # Get mHC_n from args or config (default: 4)
+        mhc_n = args.mhc_n if args.mhc_n is not None else getattr(config, 'MHC_N', 4)
+        model = ResTranOCR_mHC(
+            num_classes=config.NUM_CLASSES,
+            transformer_heads=config.TRANSFORMER_HEADS,
+            transformer_layers=config.TRANSFORMER_LAYERS,
+            transformer_ff_dim=config.TRANSFORMER_FF_DIM,
+            dropout=config.TRANSFORMER_DROPOUT,
+            use_stn=config.USE_STN,
+            mhc_n=mhc_n,
+        ).to(config.DEVICE)
+        print(f"   mHC: {mhc_n} parallel streams, multi-stream residual routing")
     elif config.MODEL_TYPE == "restran":
         model = ResTranOCR(
             num_classes=config.NUM_CLASSES,

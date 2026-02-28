@@ -379,3 +379,232 @@ class PositionalEncoding(nn.Module):
         """
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
+
+
+# ==================== Manifold-Constrained Hyper-Connections (mHC) ====================
+def sinkhorn_knopp(H_tilde: torch.Tensor, t_max: int = 20) -> torch.Tensor:
+    """
+    Sinkhorn-Knopp algorithm to create doubly stochastic matrix.
+    
+    Args:
+        H_tilde: Input tensor [..., n, n]
+        t_max: Number of iterations
+    
+    Returns:
+        Doubly stochastic matrix with same shape as input
+    """
+    # 1. Initial positive matrix M(0) = exp(H_tilde)
+    M = torch.exp(H_tilde)
+    
+    for _ in range(t_max):
+        # 2. Iterative row and column normalization
+        M = M / M.sum(dim=-1, keepdim=True)
+        M = M / M.sum(dim=-2, keepdim=True)
+    return M  # doubly stochastic matrix
+
+
+class mHCResidualWrapper(nn.Module):
+    """
+    Manifold-Constrained Hyper-Connection wrapper for CNN residual blocks.
+    
+    Applies the mHC mechanism to any CNN block with residual connection:
+        - Expands the input into n streams
+        - Applies the CNN sub-layer
+        - Combines streams using doubly stochastic matrices
+    
+    Based on DeepSeek-V3 architecture adapted for CNNs.
+    
+    Args:
+        channels: Number of input/output channels (C)
+        n: Number of streams/expansion rate (typically 4)
+    """
+    def __init__(self, channels: int, n: int = 4):
+        super().__init__()
+        self.n = n
+        self.channels = channels
+        self.n_channels = n * channels
+        
+        # Linear projections for dynamic mappings
+        # Maps flattened n*C context to coefficients for pre, post, and res
+        self.phi = nn.Linear(self.n_channels, n + n + (n * n))
+        
+        # Gating factors initialized to 0.01 for stability
+        self.alpha_pre = nn.Parameter(torch.full((1,), 0.01))
+        self.alpha_post = nn.Parameter(torch.full((1,), 0.01))
+        self.alpha_res = nn.Parameter(torch.full((1,), 0.01))
+        
+        # RMSNorm for high-precision normalization
+        self.rms = nn.RMSNorm(self.n_channels, eps=1e-20)
+    
+    def apply_mhc(self, x_l: torch.Tensor, sublayer_fn) -> torch.Tensor:
+        """
+        Apply mHC mechanism to CNN block.
+        
+        Args:
+            x_l: Hidden matrix [B, n, C, H, W]
+            sublayer_fn: CNN sub-layer function
+        
+        Returns:
+            Updated hidden matrix [B, n, C, H, W]
+        """
+        B, n, C, H, W = x_l.shape
+        
+        # 1. Flatten spatial dimensions and normalize
+        x_flat = x_l.view(B, self.n_channels, H, W)
+        
+        # Global average pooling for generating coefficients
+        x_pooled = F.adaptive_avg_pool2d(x_flat, 1).view(B, self.n_channels)
+        x_norm = self.rms(x_pooled)
+        
+        # 2. Generate Mappings (Dynamic + Static Bias)
+        coeffs = self.phi(x_norm)  # [B, n + n + n*n]
+        H_tilde_pre = coeffs[..., :n]  # [B, n]
+        H_tilde_post = coeffs[..., n:2*n]  # [B, n]
+        H_tilde_res = coeffs[..., 2*n:].view(B, n, n)  # [B, n, n]
+        
+        # 3. Manifold Projections
+        H_pre = torch.sigmoid(self.alpha_pre * H_tilde_pre)  # [B, n]
+        H_post = 2 * torch.sigmoid(self.alpha_post * H_tilde_post)  # [B, n]
+        H_res = sinkhorn_knopp(self.alpha_res * H_tilde_res)  # [B, n, n]
+        
+        # 4. Signal Propagation
+        # Read-out: Aggregate streams for the sub-layer input
+        # [B, n, 1, 1, 1] * [B, n, C, H, W] -> sum over n -> [B, C, H, W]
+        h_in = torch.einsum('bn,bnchw->bchw', H_pre, x_l)
+        
+        # Apply the CNN function
+        h_out = sublayer_fn(h_in)  # [B, C, H, W]
+        
+        # Write-in and Update Stream
+        # Expand h_out for post connection: [B, n, 1, 1, 1] * [B, C, H, W] -> [B, n, C, H, W]
+        post_part = torch.einsum('bn,bchw->bnchw', H_post, h_out)
+        
+        # Residual connection through doubly stochastic matrix
+        # [B, n, n, 1, 1, 1] * [B, n, C, H, W] -> [B, n, C, H, W]
+        res_part = torch.einsum('bnn,bnchw->bnchw', H_res, x_l)
+        
+        return res_part + post_part  # [B, n, C, H, W]
+    
+    def forward(self, x: torch.Tensor, sublayer_fn) -> torch.Tensor:
+        """
+        Forward pass with mHC mechanism.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            sublayer_fn: CNN sub-layer to apply
+        
+        Returns:
+            Output tensor [B, C, H, W]
+        """
+        B, C, H, W = x.shape
+        
+        # Expand to multi-stream: [B, C, H, W] -> [B, n, C, H, W]
+        x_matrix = x.unsqueeze(1).repeat(1, self.n, 1, 1, 1)
+        
+        # Apply mHC
+        x_matrix = self.apply_mhc(x_matrix, sublayer_fn)
+        
+        # Collapse streams: [B, n, C, H, W] -> [B, C, H, W]
+        x_out = x_matrix.mean(dim=1)
+        
+        return x_out
+
+
+class ResNetFeatureExtractor_mHC(nn.Module):
+    """
+    ResNet-based backbone with Manifold-Constrained Hyper-Connections (mHC).
+    
+    Enhances standard ResNet34 by applying mHC mechanism to stable-channel blocks,
+    enabling multi-stream processing and dynamic routing through doubly
+    stochastic matrices.
+    
+    Architecture approach:
+        - Standard ResNet forward pass for all blocks
+        - Apply mHC enhancement as additional connection on stable blocks
+        - Skip channel-changing blocks (downsample) to avoid mismatch
+    
+    Benefits:
+        - Multi-stream processing for diverse feature learning
+        - Doubly stochastic matrices ensure stable gradient flow
+        - Adaptive gating learns optimal feature combination
+    
+    Args:
+        pretrained: Whether to load pretrained ResNet34 weights
+        n: Number of streams for mHC (default: 4)
+    """
+    def __init__(self, pretrained: bool = False, n: int = 4):
+        super().__init__()
+        self.n = n
+        
+        # Load ResNet34 from torchvision
+        weights = ResNet34_Weights.DEFAULT if pretrained else None
+        resnet = resnet34(weights=weights)
+        
+        # --- Standard ResNet layers ---
+        self.conv1 = resnet.conv1
+        self.bn1 = resnet.bn1
+        self.relu = resnet.relu
+        self.maxpool = resnet.maxpool
+        
+        self.layer1 = resnet.layer1  # 64 -> 64
+        self.layer2 = resnet.layer2  # 64 -> 128
+        self.layer3 = resnet.layer3  # 128 -> 256
+        self.layer4 = resnet.layer4  # 256 -> 512
+        
+        # Modify strides in layer3 and layer4 to (2, 1) for OCR
+        self.layer3[0].conv1.stride = (2, 1)
+        self.layer3[0].downsample[0].stride = (2, 1)
+        
+        self.layer4[0].conv1.stride = (2, 1)
+        self.layer4[0].downsample[0].stride = (2, 1)
+        
+        # --- mHC wrappers for stable-channel blocks ---
+        # Apply mHC to blocks within each layer (not across layers)
+        # This avoids channel mismatch issues
+        self.mhc_1 = mHCResidualWrapper(channels=64, n=n)   # for layer1 blocks 1-2
+        self.mhc_2 = mHCResidualWrapper(channels=128, n=n)  # for layer2 blocks 1-3
+        self.mhc_3 = mHCResidualWrapper(channels=256, n=n)  # for layer3 blocks 1-5
+        self.mhc_4 = mHCResidualWrapper(channels=512, n=n)  # for layer4 blocks 1-2
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass with mHC-enhanced residual connections.
+        
+        Args:
+            x: Input images [Batch, 3, H, W]
+        
+        Returns:
+            Features [Batch, 512, 1, W'] suitable for sequence modeling
+        """
+        # Initial convolution
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        
+        # Layer 1: [B, 64, H, W]
+        # Process first block normally, then apply mHC for subsequent blocks
+        x = self.layer1[0](x)  # First block establishes 64 channels
+        for block in self.layer1[1:]:
+            # Apply mHC wrapper to stable blocks
+            x = self.mhc_1(x, block)
+        
+        # Layer 2: [B, 64->128, H, W]
+        x = self.layer2[0](x)  # Downsample block (64->128)
+        for block in self.layer2[1:]:
+            x = self.mhc_2(x, block)
+        
+        # Layer 3: [B, 128->256, H, W]
+        x = self.layer3[0](x)  # Downsample block (128->256)
+        for block in self.layer3[1:]:
+            x = self.mhc_3(x, block)
+        
+        # Layer 4: [B, 256->512, H, W]
+        x = self.layer4[0](x)  # Downsample block (256->512)
+        for block in self.layer4[1:]:
+            x = self.mhc_4(x, block)
+        
+        # Collapse height to 1 for sequence modeling
+        x = F.adaptive_avg_pool2d(x, (1, None))
+        
+        return x
