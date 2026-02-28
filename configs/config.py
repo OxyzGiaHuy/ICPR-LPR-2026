@@ -19,9 +19,9 @@ class Config:
     """Training configuration with all hyperparameters."""
     
     # Experiment tracking
-    MODEL_TYPE: str = "restran"  # "crnn", "restran", or "restran_moe"
+    MODEL_TYPE: str = "restran_mhc"  # "crnn", "restran", "restran_moe", or "restran_mhc"
     EXPERIMENT_NAME: str = MODEL_TYPE
-    AUGMENTATION_LEVEL: str = "full"  # "full" or "light"
+    AUGMENTATION_LEVEL: str = "light"  # "full" or "light" (use light for mHC stability)
     USE_STN: bool = True  # Enable Spatial Transformer Network
     
     # Data paths
@@ -41,17 +41,17 @@ class Config:
     # Weighted CTC loss gives rare characters more gradient → better learning
     USE_CHARACTER_BALANCING: bool = True       # Enable weighted CTC loss
     CHAR_WEIGHT_SMOOTHING: float = 0.1         # 0.0 = pure inverse freq, 1.0 = uniform
-    OVERSAMPLE_RARE_CHARS: bool = True         # Duplicate rare char samples 3x
+    OVERSAMPLE_RARE_CHARS: bool = False        # Disabled for mHC stability (was True)
     RARE_CHAR_THRESHOLD: int = 2000           # Characters with freq < 2000 = rare (K,L,M,N,O...)
     
     # Training hyperparameters
-    BATCH_SIZE: int = 64
-    LEARNING_RATE: float = 5e-4
+    BATCH_SIZE: int = 32  # Reduced for mHC stability (64 for baseline models)
+    LEARNING_RATE: float = 1e-4  # Lower for mHC (5e-4 for baseline)
     EPOCHS: int = 80  # Increased for hard Scenario B val set (30 for quick test, 80 for full training)
     SEED: int = 42
     NUM_WORKERS: int = 4  # Kaggle recommends ≤4 workers to avoid slowdowns
     WEIGHT_DECAY: float = 3e-4  # Stronger regularization for LR images
-    GRAD_CLIP: float = 5.0
+    GRAD_CLIP: float = 1.0  # Aggressive clipping for mHC (5.0 for baseline)
     SPLIT_RATIO: float = 0.9
     USE_CUDNN_BENCHMARK: bool = False
     
@@ -88,7 +88,7 @@ class Config:
     # - Stream specialization: lighting (day/night), weather (rain/fog), viewing angles
     # - Doubly stochastic routing ensures stable gradient flow
     # - Minimal overhead: ~5-10% parameter increase for significant robustness gains
-    MHC_N: int = 4                     # Number of parallel streams (2, 4, or 8 recommended)
+    MHC_N: int = 2                     # Number of parallel streams (start with 2 for stability)
     
     DEVICE: torch.device = field(default_factory=lambda: torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     OUTPUT_DIR: str = "results"

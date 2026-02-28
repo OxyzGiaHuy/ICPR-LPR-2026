@@ -382,24 +382,35 @@ class PositionalEncoding(nn.Module):
 
 
 # ==================== Manifold-Constrained Hyper-Connections (mHC) ====================
-def sinkhorn_knopp(H_tilde: torch.Tensor, t_max: int = 20) -> torch.Tensor:
+def sinkhorn_knopp(H_tilde: torch.Tensor, t_max: int = 20, eps: float = 1e-8) -> torch.Tensor:
     """
     Sinkhorn-Knopp algorithm to create doubly stochastic matrix.
     
     Args:
         H_tilde: Input tensor [..., n, n]
         t_max: Number of iterations
+        eps: Small constant for numerical stability
     
     Returns:
         Doubly stochastic matrix with same shape as input
     """
+    # Clip input to prevent overflow/underflow
+    H_tilde = torch.clamp(H_tilde, min=-10.0, max=10.0)
+    
     # 1. Initial positive matrix M(0) = exp(H_tilde)
     M = torch.exp(H_tilde)
     
     for _ in range(t_max):
-        # 2. Iterative row and column normalization
-        M = M / M.sum(dim=-1, keepdim=True)
-        M = M / M.sum(dim=-2, keepdim=True)
+        # 2. Iterative row and column normalization with eps for stability
+        row_sum = M.sum(dim=-1, keepdim=True)
+        M = M / (row_sum + eps)
+        
+        col_sum = M.sum(dim=-2, keepdim=True)
+        M = M / (col_sum + eps)
+    
+    # Final check for NaN/Inf
+    M = torch.where(torch.isnan(M) | torch.isinf(M), torch.ones_like(M) / M.shape[-1], M)
+    
     return M  # doubly stochastic matrix
 
 
@@ -454,36 +465,60 @@ class mHCResidualWrapper(nn.Module):
         
         # Global average pooling for generating coefficients
         x_pooled = F.adaptive_avg_pool2d(x_flat, 1).view(B, self.n_channels)
+        
+        # Check for NaN/Inf before normalization
+        if torch.isnan(x_pooled).any() or torch.isinf(x_pooled).any():
+            print("⚠️  Warning: NaN/Inf detected in mHC input, using zero coefficients")
+            return x_l
+        
         x_norm = self.rms(x_pooled)
         
         # 2. Generate Mappings (Dynamic + Static Bias)
         coeffs = self.phi(x_norm)  # [B, n + n + n*n]
+        
+        # Clip coefficients to prevent extreme values
+        coeffs = torch.clamp(coeffs, min=-5.0, max=5.0)
+        
         H_tilde_pre = coeffs[..., :n]  # [B, n]
         H_tilde_post = coeffs[..., n:2*n]  # [B, n]
         H_tilde_res = coeffs[..., 2*n:].view(B, n, n)  # [B, n, n]
         
-        # 3. Manifold Projections
+        # 3. Manifold Projections with stability
         H_pre = torch.sigmoid(self.alpha_pre * H_tilde_pre)  # [B, n]
         H_post = 2 * torch.sigmoid(self.alpha_post * H_tilde_post)  # [B, n]
         H_res = sinkhorn_knopp(self.alpha_res * H_tilde_res)  # [B, n, n]
         
         # 4. Signal Propagation
         # Read-out: Aggregate streams for the sub-layer input
-        # [B, n, 1, 1, 1] * [B, n, C, H, W] -> sum over n -> [B, C, H, W]
         h_in = torch.einsum('bn,bnchw->bchw', H_pre, x_l)
+        
+        # Check before applying sublayer
+        if torch.isnan(h_in).any() or torch.isinf(h_in).any():
+            print("⚠️  Warning: NaN/Inf in h_in, skipping mHC")
+            return x_l
         
         # Apply the CNN function
         h_out = sublayer_fn(h_in)  # [B, C, H, W]
         
+        # Check sublayer output
+        if torch.isnan(h_out).any() or torch.isinf(h_out).any():
+            print("⚠️  Warning: NaN/Inf in sublayer output, skipping mHC")
+            return x_l
+        
         # Write-in and Update Stream
-        # Expand h_out for post connection: [B, n, 1, 1, 1] * [B, C, H, W] -> [B, n, C, H, W]
         post_part = torch.einsum('bn,bchw->bnchw', H_post, h_out)
         
         # Residual connection through doubly stochastic matrix
-        # [B, n, n, 1, 1, 1] * [B, n, C, H, W] -> [B, n, C, H, W]
         res_part = torch.einsum('bnn,bnchw->bnchw', H_res, x_l)
         
-        return res_part + post_part  # [B, n, C, H, W]
+        result = res_part + post_part
+        
+        # Final NaN check
+        if torch.isnan(result).any() or torch.isinf(result).any():
+            print("⚠️  Warning: NaN/Inf in mHC output, returning input")
+            return x_l
+        
+        return result  # [B, n, C, H, W]
     
     def forward(self, x: torch.Tensor, sublayer_fn) -> torch.Tensor:
         """
