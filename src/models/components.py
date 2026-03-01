@@ -468,7 +468,13 @@ class mHCResidualWrapper(nn.Module):
         
         # Check for NaN/Inf before normalization
         if torch.isnan(x_pooled).any() or torch.isinf(x_pooled).any():
-            print("⚠️  Warning: NaN/Inf detected in mHC input, using zero coefficients")
+            print(f"\n🔴 NaN/Inf in mHC INPUT (pooled):")
+            print(f"   Shape: {x_pooled.shape}")
+            print(f"   NaN count: {torch.isnan(x_pooled).sum().item()}")
+            print(f"   Inf count: {torch.isinf(x_pooled).sum().item()}")
+            print(f"   Min: {x_pooled[~torch.isnan(x_pooled) & ~torch.isinf(x_pooled)].min().item() if (x_pooled.numel() > 0 and (~torch.isnan(x_pooled) & ~torch.isinf(x_pooled)).any()) else 'all nan/inf'}")
+            print(f"   Max: {x_pooled[~torch.isnan(x_pooled) & ~torch.isinf(x_pooled)].max().item() if (x_pooled.numel() > 0 and (~torch.isnan(x_pooled) & ~torch.isinf(x_pooled)).any()) else 'all nan/inf'}")
+            print(f"   Alpha params: pre={self.alpha_pre.item():.6f}, post={self.alpha_post.item():.6f}, res={self.alpha_res.item():.6f}")
             return x_l
         
         x_norm = self.rms(x_pooled)
@@ -494,7 +500,9 @@ class mHCResidualWrapper(nn.Module):
         
         # Check before applying sublayer
         if torch.isnan(h_in).any() or torch.isinf(h_in).any():
-            print("⚠️  Warning: NaN/Inf in h_in, skipping mHC")
+            print(f"\n🟠 NaN/Inf in mHC READ-OUT (h_in):")
+            print(f"   H_pre stats: min={H_pre.min().item():.6f}, max={H_pre.max().item():.6f}, mean={H_pre.mean().item():.6f}")
+            print(f"   h_in: NaN={torch.isnan(h_in).sum().item()}, Inf={torch.isinf(h_in).sum().item()}")
             return x_l
         
         # Apply the CNN function
@@ -502,7 +510,10 @@ class mHCResidualWrapper(nn.Module):
         
         # Check sublayer output
         if torch.isnan(h_out).any() or torch.isinf(h_out).any():
-            print("⚠️  Warning: NaN/Inf in sublayer output, skipping mHC")
+            print(f"\n🟡 NaN/Inf in SUBLAYER OUTPUT (h_out):")
+            print(f"   Sublayer: {sublayer_fn}")
+            print(f"   h_out: NaN={torch.isnan(h_out).sum().item()}, Inf={torch.isinf(h_out).sum().item()}")
+            print(f"   h_out stats (non-nan): min={h_out[~torch.isnan(h_out)].min().item() if (~torch.isnan(h_out)).any() else 'all nan'}, max={h_out[~torch.isnan(h_out)].max().item() if (~torch.isnan(h_out)).any() else 'all nan'}")
             return x_l
         
         # Write-in and Update Stream
@@ -515,7 +526,11 @@ class mHCResidualWrapper(nn.Module):
         
         # Final NaN check
         if torch.isnan(result).any() or torch.isinf(result).any():
-            print("⚠️  Warning: NaN/Inf in mHC output, returning input")
+            print(f"\n🔵 NaN/Inf in mHC FINAL OUTPUT (result):")
+            print(f"   post_part: NaN={torch.isnan(post_part).sum().item()}, Inf={torch.isinf(post_part).sum().item()}")
+            print(f"   res_part: NaN={torch.isnan(res_part).sum().item()}, Inf={torch.isinf(res_part).sum().item()}")
+            print(f"   H_post stats: min={H_post.min().item():.6f}, max={H_post.max().item():.6f}")
+            print(f"   H_res stats: min={H_res.min().item():.6f}, max={H_res.max().item():.6f}")
             return x_l
         
         return result  # [B, n, C, H, W]

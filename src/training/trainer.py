@@ -127,6 +127,35 @@ class Trainer:
     def train_one_epoch(self) -> float:
         """Train for one epoch."""
         self.model.train()
+        
+        # Check model parameters health at start of epoch
+        print(f"\\n\ud83d\udd0d Checking model parameters before epoch {self.current_epoch + 1}...")
+        nan_params = []
+        for name, param in self.model.named_parameters():
+            if torch.isnan(param).any() or torch.isinf(param).any():
+                nan_params.append(name)
+        
+        if nan_params:
+            print(f"\u274c Found NaN/Inf in {len(nan_params)} parameters:")
+            for name in nan_params[:5]:  # Show first 5
+                print(f"   - {name}")
+            raise ValueError(f"Model has NaN/Inf parameters at start of epoch {self.current_epoch + 1}. Cannot continue training.")
+        
+        # Check alpha parameters for mHC model
+        if hasattr(self.model, 'backbone') and hasattr(self.model.backbone, 'mhc_1'):
+            for mhc_idx in range(1, 5):  # mhc_1, mhc_2, mhc_3, mhc_4
+                mhc_attr = f'mhc_{mhc_idx}'
+                if hasattr(self.model.backbone, mhc_attr):
+                    mhc_wrapper = getattr(self.model.backbone, mhc_attr)
+                    alpha_pre = mhc_wrapper.alpha_pre.item()
+                    alpha_post = mhc_wrapper.alpha_post.item()
+                    alpha_res = mhc_wrapper.alpha_res.item()
+                    if abs(alpha_pre) > 1.0 or abs(alpha_post) > 1.0 or abs(alpha_res) > 1.0:
+                        layer_name = f'layer{mhc_idx}'
+                        print(f"⚠️  Warning: {layer_name} mHC alpha values growing: pre={alpha_pre:.4f}, post={alpha_post:.4f}, res={alpha_res:.4f}")
+        
+        print("✅ Model parameters OK\n")
+        
         epoch_loss    = 0.0
         epoch_ctc     = 0.0
         epoch_aux     = 0.0
@@ -138,10 +167,29 @@ class Trainer:
             images = images.to(self.device)
             targets = targets.to(self.device)
             
+            # Check input data for NaN/Inf
+            if torch.isnan(images).any() or torch.isinf(images).any():
+                print(f"\n🔴 NaN/Inf detected in INPUT IMAGES:")
+                print(f"   Batch shape: {images.shape}")
+                print(f"   NaN count: {torch.isnan(images).sum().item()}")
+                print(f"   Inf count: {torch.isinf(images).sum().item()}")
+                print(f"   Skipping this batch...")
+                continue
+            
             self.optimizer.zero_grad(set_to_none=True)
             
             with autocast('cuda'):
                 preds = self.model(images)
+                
+                # Check predictions for NaN/Inf
+                if torch.isnan(preds).any() or torch.isinf(preds).any():
+                    print(f"\n🔴 NaN/Inf detected in MODEL PREDICTIONS:")
+                    print(f"   Pred shape: {preds.shape}")
+                    print(f"   NaN count: {torch.isnan(preds).sum().item()}")
+                    print(f"   Inf count: {torch.isinf(preds).sum().item()}")
+                    print(f"   This indicates NaN originated in forward pass")
+                    raise ValueError("NaN detected in model predictions - forward pass corrupted")
+                
                 preds_permuted = preds.permute(1, 0, 2)
                 input_lengths = torch.full(
                     size=(images.size(0),),
@@ -167,12 +215,48 @@ class Trainer:
             # Scale loss & backward
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
+            
+            # Check for NaN in gradients before clipping
+            nan_grads = False
+            for name, param in self.model.named_parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        print(f"\n🔴 NaN/Inf detected in GRADIENTS:")
+                        print(f"   Parameter: {name}")
+                        print(f"   Grad shape: {param.grad.shape}")
+                        print(f"   NaN count: {torch.isnan(param.grad).sum().item()}")
+                        print(f"   Inf count: {torch.isinf(param.grad).sum().item()}")
+                        print(f"   Grad norm: {param.grad.norm().item() if not torch.isnan(param.grad.norm()) else 'NaN'}")\n                        nan_grads = True
+                        break
+            
+            # Check for NaN in parameters before update
+            if not nan_grads:
+                for name, param in self.model.named_parameters():
+                    if torch.isnan(param).any() or torch.isinf(param).any():
+                        print(f"\n🔴 NaN/Inf detected in MODEL PARAMETERS (before update):")
+                        print(f"   Parameter: {name}")
+                        print(f"   Shape: {param.shape}")
+                        print(f"   NaN count: {torch.isnan(param).sum().item()}")
+                        print(f"   Inf count: {torch.isinf(param).sum().item()}")
+                        nan_grads = True
+                        break
+            
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.GRAD_CLIP)
             scale_before = self.scaler.get_scale()
             self.scaler.step(self.optimizer)
             self.scaler.update()
             if self.scaler.get_scale() >= scale_before:
                 self.scheduler.step()
+            
+            # Check loss for NaN
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"\n🔴 NaN/Inf detected in LOSS:")
+                print(f"   CTC Loss: {ctc_loss.item()}")
+                print(f"   Aux Loss: {aux_loss.item()}")
+                print(f"   Total Loss: {loss.item()}")
+                print(f"   Batch: {len(epoch_loss)} of {len(self.train_loader)}")
+                print(f"\n   Stopping training to prevent corruption...\n")
+                raise ValueError(\"NaN detected in loss during training\")
             
             epoch_loss += loss.item()
             epoch_ctc  += ctc_loss.item()
